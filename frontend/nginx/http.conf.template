@@ -1,0 +1,8 @@
+# HTTP only (used when DOMAIN=localhost, e.g. trying PDFDesk on your own computer).
+limit_req_zone $binary_remote_addr zone=pdfdesk_api:10m rate=20r/s;
+
+server {
+    listen 80;
+    server_name _;
+    include /etc/nginx/pdfdesk/app-locations.conf;
+}

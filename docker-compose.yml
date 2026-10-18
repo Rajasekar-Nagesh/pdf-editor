@@ -1,0 +1,120 @@
+# PDFDesk - full stack. Start with:  docker compose up -d --build
+# Services: nginx (web + HTTPS) -> api (FastAPI) -> worker (heavy jobs) + scheduler, with PostgreSQL, Redis and MinIO.
+
+name: pdfdesk
+
+x-backend: &backend
+  build: ./backend
+  image: pdfdesk-backend:latest
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+psycopg://pdfdesk:${POSTGRES_PASSWORD}@db:5432/pdfdesk
+    REDIS_URL: redis://redis:6379/0
+    STORAGE_BACKEND: s3
+    S3_ENDPOINT_URL: http://minio:9000
+    S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+    S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    JOB_MODE: queue
+  restart: unless-stopped
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
+services:
+  nginx:
+    build: ./frontend
+    image: pdfdesk-web:latest
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - certbot-conf:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  api:
+    <<: *backend
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+    shm_size: "512m"  # Chromium (web page -> PDF) needs shared memory
+
+  scheduler:
+    <<: *backend
+    command: ["python", "-m", "app.scheduler"]
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pdfdesk
+      POSTGRES_USER: pdfdesk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdfdesk -d pdfdesk"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Renews Let's Encrypt certificates twice a day (the first certificate is requested by scripts/init-letsencrypt.sh).
+  certbot:
+    image: certbot/certbot:v3.0.1
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: ["/bin/sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  certbot-conf:
+  certbot-www:

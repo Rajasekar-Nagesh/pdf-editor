@@ -26,8 +26,21 @@ def get_db() -> Iterator[Session]:
         db.close()
 
 
-def init_db() -> None:
-    """Create tables if they do not exist. Imported models register themselves on Base."""
+def init_db(attempts: int = 10) -> None:
+    """Create tables if they do not exist. Imported models register themselves on Base.
+
+    Several containers (api workers, job workers, scheduler) start at once, so we retry: the database
+    may still be starting, or another process may be creating the same tables concurrently.
+    """
+    import time
+
     from . import models  # noqa: F401
 
-    Base.metadata.create_all(bind=engine)
+    for attempt in range(1, attempts + 1):
+        try:
+            Base.metadata.create_all(bind=engine)
+            return
+        except Exception:
+            if attempt == attempts:
+                raise
+            time.sleep(min(2 * attempt, 10))

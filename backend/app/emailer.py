@@ -26,7 +26,11 @@ def send_email(to: str, subject: str, text: str, attachments: list[tuple[str, by
         OUTBOX.append(msg)
         return True
     if not s.smtp_host:
-        log.warning("SMTP not configured; skipped email with subject %r", subject)
+        if s.environment == "development":
+            # Local development only: print the email so links (reset, signing) can be used without SMTP.
+            log.warning("SMTP not configured (development) - email to %s:\nSubject: %s\n%s", to, subject, text)
+        else:
+            log.warning("SMTP not configured; skipped email with subject %r", subject)
         return False
     try:
         with smtplib.SMTP(s.smtp_host, s.smtp_port, timeout=20) as smtp:
